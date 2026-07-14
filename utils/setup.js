@@ -12,7 +12,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const PLATFORM_FILES = [".DS_Store"];
 const PACKAGE_MANAGERS = new Set(["bun", "npm", "pnpm", "yarn"]);
-const ID_PAID = "com.foxdebug.acode";
+const ID_PAID = "org.terroristcell.acode";
 const ADMOB_PLUGIN_DIR = "admob";
 
 function isPaidVersion() {
