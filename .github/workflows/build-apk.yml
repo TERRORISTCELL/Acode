@@ -1,0 +1,58 @@
+# Fork-friendly debug APK build for TERRORISTCELL/Acode.
+# Upstream nightly-build.yml only runs when repository_owner == Acode-Foundation
+# and requires KEYSTORE / BUILD_JSON secrets we don't have here.
+
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies and Cordova platform
+        run: |
+          npm install
+          npm install -g cordova
+          npm run setup
+
+      - name: Enable MANAGE_EXTERNAL_STORAGE
+        run: node utils/storage_manager.mjs y
+
+      - name: Build debug APK
+        run: npm run build paid dev apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: acode-debug-${{ github.sha }}
+          path: platforms/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
