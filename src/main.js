@@ -532,12 +532,28 @@ async function loadApp() {
 	const $menuToggler = (
 		<span className="icon more_vert" attr-action="toggle-menu" />
 	);
+	const $chatToggler = (
+		<span
+			className="icon chat_bubble"
+			attr-action="toggle-agent-chat"
+			onclick={() => {
+				import(
+					/* webpackChunkName: "agentic-chat" */ "lib/agentic/chat"
+				)
+					.then((mod) => mod.default())
+					.catch((error) => {
+						console.error("Failed to open agent chat:", error);
+					});
+			}}
+		/>
+	);
 	const $header = tile({
 		type: "header",
 		text: "Acode",
 		lead: $navToggler,
 		tail: $menuToggler,
 	});
+	$header.insertBefore($chatToggler, $menuToggler);
 	const $main = <main />;
 	const $sidebar = <Sidebar container={$main} toggler={$navToggler} />;
 	const $runBtn = (
@@ -731,7 +747,7 @@ async function loadApp() {
 			activeFile.type !== "terminal"
 		) {
 			if (!$editMenuToggler.isConnected) {
-				$header.insertBefore($editMenuToggler, $header.lastChild);
+				$header.insertBefore($editMenuToggler, $chatToggler);
 			}
 		} else {
 			$editMenuToggler.remove();
@@ -764,7 +780,7 @@ async function loadApp() {
 			}
 
 			if (canRun) {
-				$header.insertBefore($runBtn, $header.lastChild);
+				$header.insertBefore($runBtn, $chatToggler);
 			} else {
 				$runBtn.remove();
 			}
