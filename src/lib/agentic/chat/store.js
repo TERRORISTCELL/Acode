@@ -81,7 +81,9 @@ function normalize(raw) {
 					updatedAt: Number(s.updatedAt) || Date.now(),
 					messages: Array.isArray(s.messages)
 						? s.messages
-								.filter((m) => m && (m.role === "user" || m.role === "assistant"))
+								.filter(
+									(m) => m && (m.role === "user" || m.role === "assistant"),
+								)
 								.map((m) => ({
 									id: m.id || helpers.uuid(),
 									role: m.role,
@@ -259,4 +261,4 @@ export function appendAssistantMessage(state, content) {
 	return { ...state, sessions };
 }
 
-export { DEFAULT_SETTINGS, createSession };
+export { createSession, DEFAULT_SETTINGS };

@@ -1,11 +1,21 @@
 .agentic-chat-page {
-	.main {
+	display: flex;
+	flex-direction: column;
+
+	> .header.tile,
+	> header.tile {
+		flex: 0 0 auto;
+	}
+
+	> .main {
 		display: flex;
 		flex-direction: column;
+		flex: 1;
+		min-height: 0;
 		padding: 0 !important;
 		overflow: hidden;
-		height: 100%;
-		max-height: 100%;
+		height: auto !important;
+		max-height: none;
 	}
 }
 
@@ -14,7 +24,6 @@
 	display: flex;
 	flex: 1;
 	min-height: 0;
-	height: 100%;
 	width: 100%;
 	background: var(--secondary-color);
 	color: var(--primary-text-color);
@@ -27,7 +36,7 @@
 	border: 0;
 	padding: 0;
 	margin: 0;
-	background: color-mix(in srgb, #000 45%, transparent);
+	background: color-mix(in srgb, #000 42%, transparent);
 	opacity: 0;
 	pointer-events: none;
 	transition: opacity 0.18s ease;
@@ -44,14 +53,15 @@
 	left: 0;
 	bottom: 0;
 	z-index: 3;
-	width: min(82vw, 300px);
+	width: min(86vw, 320px);
 	display: flex;
 	flex-direction: column;
 	background: var(--popup-background-color);
 	color: var(--popup-text-color, var(--primary-text-color));
-	box-shadow: 4px 0 24px color-mix(in srgb, #000 28%, transparent);
+	box-shadow: 6px 0 28px color-mix(in srgb, #000 24%, transparent);
 	transform: translateX(-105%);
 	transition: transform 0.2s ease;
+	padding-bottom: env(safe-area-inset-bottom, 0);
 }
 
 .agentic-chat.drawer-open .agentic-chat__drawer {
@@ -62,15 +72,16 @@
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 8px;
-	padding: 12px 12px 8px;
+	gap: 10px;
+	padding: 14px 12px 12px;
 	border-bottom: 1px solid var(--border-color);
 }
 
 .agentic-chat__drawer-head h2 {
 	margin: 0;
-	font-size: 1rem;
+	font-size: 1.05rem;
 	font-weight: 600;
+	letter-spacing: 0.01em;
 }
 
 .agentic-chat__new {
@@ -78,12 +89,14 @@
 	align-items: center;
 	gap: 4px;
 	border: 0;
-	border-radius: 8px;
-	padding: 6px 10px;
+	border-radius: 999px;
+	padding: 7px 12px;
 	background: var(--button-background-color);
 	color: var(--button-text-color, #fff);
 	font: inherit;
-	font-size: 0.85rem;
+	font-size: 0.82rem;
+	font-weight: 500;
+	white-space: nowrap;
 }
 
 .agentic-chat__session-list {
@@ -93,19 +106,31 @@
 	list-style: none;
 	margin: 0;
 	padding: 8px;
+	-webkit-overflow-scrolling: touch;
+}
+
+.agentic-chat__session-empty {
+	padding: 24px 12px;
+	text-align: center;
+	opacity: 0.55;
+	font-size: 0.9rem;
 }
 
 .agentic-chat__session {
 	display: flex;
-	align-items: center;
-	gap: 4px;
+	align-items: stretch;
+	gap: 2px;
 	margin-bottom: 4px;
-	border-radius: 8px;
+	border-radius: 12px;
 	background: transparent;
 }
 
 .agentic-chat__session.active {
-	background: color-mix(in srgb, var(--button-background-color) 18%, transparent);
+	background: color-mix(
+		in srgb,
+		var(--button-background-color) 16%,
+		transparent
+	);
 }
 
 .agentic-chat__session-open {
@@ -116,8 +141,11 @@
 	color: inherit;
 	font: inherit;
 	text-align: left;
-	padding: 10px 10px;
-	border-radius: 8px;
+	padding: 10px 12px;
+	border-radius: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
 }
 
 .agentic-chat__session-title {
@@ -125,22 +153,36 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	font-size: 0.92rem;
+	font-weight: 500;
+}
+
+.agentic-chat__session-sub {
+	display: block;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 0.75rem;
+	opacity: 0.55;
 }
 
 .agentic-chat__session-delete {
 	flex: 0 0 auto;
+	align-self: center;
 	border: 0;
 	background: transparent;
 	color: inherit;
-	opacity: 0.55;
-	padding: 8px;
-	border-radius: 8px;
+	opacity: 0.45;
+	padding: 10px;
+	border-radius: 10px;
+	font-size: 1.1em;
 }
 
 .agentic-chat__session-delete:active,
 .agentic-chat__new:active,
-.agentic-chat__session-open:active {
-	opacity: 0.8;
+.agentic-chat__session-open:active,
+.agentic-chat__meta-btn:active {
+	opacity: 0.75;
 }
 
 .agentic-chat__main {
@@ -148,53 +190,57 @@
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
-}
-
-.agentic-chat__toolbar {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	padding: 8px 12px;
-	border-bottom: 1px solid var(--border-color);
-	background: var(--primary-color);
-	color: var(--primary-text-color);
-}
-
-.agentic-chat__toolbar-title {
-	flex: 1;
-	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	font-size: 0.95rem;
-	font-weight: 500;
+	min-height: 0;
 }
 
 .agentic-chat__messages {
 	flex: 1;
 	min-height: 0;
 	overflow: auto;
-	padding: 16px 12px 12px;
+	padding: 16px 14px 12px;
 	display: flex;
 	flex-direction: column;
-	gap: 10px;
+	gap: 12px;
+	-webkit-overflow-scrolling: touch;
 }
 
 .agentic-chat__empty {
 	margin: auto;
-	max-width: 18rem;
+	max-width: 16.5rem;
 	text-align: center;
-	opacity: 0.65;
-	font-size: 0.95rem;
-	line-height: 1.45;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 6px;
+	padding: 24px 8px;
+	opacity: 0.78;
+
+	strong {
+		font-size: 1.05rem;
+		font-weight: 600;
+	}
+
+	p {
+		margin: 0;
+		font-size: 0.9rem;
+		line-height: 1.45;
+		opacity: 0.8;
+	}
+}
+
+.agentic-chat__empty-icon {
+	font-size: 2rem;
+	opacity: 0.55;
+	margin-bottom: 4px;
 }
 
 .agentic-chat__bubble {
-	max-width: min(92%, 36rem);
-	padding: 10px 12px;
-	border-radius: 14px;
-	line-height: 1.45;
+	max-width: min(90%, 34rem);
+	padding: 11px 13px;
+	border-radius: 16px;
+	line-height: 1.5;
 	white-space: pre-wrap;
+	overflow-wrap: anywhere;
 	word-break: break-word;
 	font-size: 0.95rem;
 }
@@ -203,47 +249,79 @@
 	align-self: flex-end;
 	background: var(--button-background-color);
 	color: var(--button-text-color, #fff);
-	border-bottom-right-radius: 4px;
+	border-bottom-right-radius: 5px;
 }
 
 .agentic-chat__bubble.assistant {
 	align-self: flex-start;
 	background: var(--popup-background-color);
 	color: var(--popup-text-color, var(--primary-text-color));
-	border-bottom-left-radius: 4px;
+	border-bottom-left-radius: 5px;
+	box-shadow: 0 1px 0 color-mix(in srgb, var(--border-color) 65%, transparent);
 }
 
 .agentic-chat__composer {
+	flex: 0 0 auto;
 	border-top: 1px solid var(--border-color);
-	padding: 8px 12px 12px;
-	background: var(--primary-color);
+	padding: 8px 12px calc(10px + env(safe-area-inset-bottom, 0));
+	background: color-mix(
+		in srgb,
+		var(--primary-color) 88%,
+		var(--secondary-color)
+	);
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
 }
 
-.agentic-chat__controls {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 8px;
+.agentic-chat__meta {
+	display: grid;
+	grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+	gap: 6px;
 }
 
-.agentic-chat__chip {
+.agentic-chat__meta-btn {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
 	border: 1px solid var(--border-color);
-	border-radius: 999px;
-	background: color-mix(in srgb, var(--secondary-color) 70%, transparent);
+	border-radius: 10px;
+	background: var(--secondary-color);
 	color: inherit;
 	font: inherit;
-	font-size: 0.8rem;
-	padding: 6px 10px;
-	max-width: 100%;
+	padding: 7px 8px 7px 10px;
+	text-align: left;
+
+	.icon {
+		flex: 0 0 auto;
+		opacity: 0.55;
+		font-size: 1.15em;
+		margin-left: auto;
+	}
+
+	&:disabled {
+		opacity: 0.42;
+	}
+}
+
+.agentic-chat__meta-label {
+	flex: 0 0 auto;
+	font-size: 0.68rem;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	opacity: 0.55;
+	font-weight: 600;
+}
+
+.agentic-chat__meta-value {
+	flex: 1;
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-}
-
-.agentic-chat__chip:disabled {
-	opacity: 0.45;
+	font-size: 0.82rem;
+	font-weight: 500;
 }
 
 .agentic-chat__input-row {
@@ -255,15 +333,24 @@
 .agentic-chat__input {
 	flex: 1;
 	min-height: 44px;
-	max-height: 140px;
+	max-height: 132px;
 	resize: none;
 	border: 1px solid var(--border-color);
-	border-radius: 12px;
-	padding: 10px 12px;
+	border-radius: 14px;
+	padding: 11px 12px;
 	background: var(--secondary-color);
 	color: var(--primary-text-color);
 	font: inherit;
 	line-height: 1.4;
+	outline: none;
+
+	&:focus {
+		border-color: color-mix(
+			in srgb,
+			var(--button-background-color) 55%,
+			var(--border-color)
+		);
+	}
 }
 
 .agentic-chat__send {
@@ -271,14 +358,18 @@
 	width: 44px;
 	height: 44px;
 	border: 0;
-	border-radius: 12px;
+	border-radius: 14px;
 	background: var(--button-background-color);
 	color: var(--button-text-color, #fff);
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-}
 
-.agentic-chat__send:disabled {
-	opacity: 0.45;
+	&:disabled {
+		opacity: 0.38;
+	}
+
+	.icon {
+		font-size: 1.2em;
+	}
 }

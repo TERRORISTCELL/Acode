@@ -6,7 +6,7 @@ name: Build APK
 
 on:
   push:
-    branches: [main]
+    branches: [main, agentic]
   workflow_dispatch:
 
 permissions:

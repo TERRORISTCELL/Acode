@@ -41,6 +41,8 @@ extend-exclude = [
     "src/lang/zh-cn.json",
     "src/lang/zh-hant.json",
     "src/lang/zh-tw.json",
+    # Upstream models.dev snapshot — brand/model id spellings are intentional
+    "src/lib/agentic/data/catalog.json",
 ]
 
 [default.extend-words]

@@ -537,9 +537,7 @@ async function loadApp() {
 			className="icon chat_bubble"
 			attr-action="toggle-agent-chat"
 			onclick={() => {
-				import(
-					/* webpackChunkName: "agentic-chat" */ "lib/agentic/chat"
-				)
+				import(/* webpackChunkName: "agentic-chat" */ "lib/agentic/chat")
 					.then((mod) => mod.default())
 					.catch((error) => {
 						console.error("Failed to open agent chat:", error);

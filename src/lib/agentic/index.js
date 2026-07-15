@@ -4,15 +4,13 @@
  */
 export {
 	catalog,
-	meta,
-	listProviders,
-	getProvider,
-	listModels,
 	getModel,
-	resolveModel,
+	getProvider,
 	listBundledProviders,
+	listModels,
+	listProviders,
+	meta,
+	resolveModel,
 } from "./catalog";
-
-export { SDK_PACKAGES, isBundledSdkPackage } from "./sdkPackages";
-
 export { default as openAgentChat } from "./chat";
+export { isBundledSdkPackage, SDK_PACKAGES } from "./sdkPackages";
