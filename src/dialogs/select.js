@@ -8,6 +8,8 @@ import restoreTheme from "lib/restoreTheme";
  * @typedef {object} SelectOptions
  * @property {boolean} [hideOnSelect]
  * @property {boolean} [textTransform]
+ * @property {boolean} [search] Show a search box to filter items
+ * @property {string} [searchPlaceholder]
  * @property {string} [default]
  * @property {function():void} [onCancel]
  * @property {function():void} [onHide]
@@ -40,10 +42,14 @@ function select(title, items, options = {}) {
 	}
 
 	return new Promise((res, rej) => {
-		const { textTransform = false, hideOnSelect = true } = options;
+		const {
+			textTransform = false,
+			hideOnSelect = true,
+			search = false,
+			searchPlaceholder = "Search…",
+		} = options;
 		let $defaultVal;
 
-		// elements
 		const $mask = <span className="mask" onclick={cancel}></span>;
 		const $list = tag("ul", {
 			className: `scroll${!textTransform ? " no-text-transform" : ""}`,
@@ -51,14 +57,35 @@ function select(title, items, options = {}) {
 		const $titleSpan = title ? (
 			<strong className="title">{title}</strong>
 		) : null;
-		const $select = (
-			<div className="prompt select">
-				{$titleSpan ? [$titleSpan, $list] : $list}
-			</div>
-		);
+		const $searchInput = search
+			? tag("input", {
+					type: "search",
+					className: "select-search",
+					placeholder: searchPlaceholder,
+					enterKeyHint: "search",
+					autocapitalize: "off",
+					autocomplete: "off",
+					autocorrect: "off",
+					spellcheck: false,
+				})
+			: null;
+		const $empty = search
+			? tag("div", {
+					className: "select-empty hide",
+					textContent: "No matches",
+				})
+			: null;
+		const $select = tag("div", {
+			className: `prompt select${search ? " searchable" : ""}`,
+		});
+		if ($titleSpan) $select.append($titleSpan);
+		if ($searchInput) $select.append($searchInput);
+		$select.append($list);
+		if ($empty) $select.append($empty);
 
-		// Track tail click handlers for cleanup
 		const tailClickHandlers = new Map();
+		/** @type {Array<{el: HTMLElement, haystack: string}>} */
+		const searchable = [];
 
 		items.map((item) => {
 			let lead,
@@ -74,10 +101,8 @@ function select(title, items, options = {}) {
 					ontailclick: null,
 				};
 
-			// init item options
 			if (typeof item === "object") {
 				if (Array.isArray(item)) {
-					// This format does NOT support custom tail or handlers so pass object :)
 					Object.keys(itemOptions).forEach(
 						(key, i) => (itemOptions[key] = item[i]),
 					);
@@ -93,7 +118,6 @@ function select(title, items, options = {}) {
 				itemOptions.text = item;
 			}
 
-			// handle icon (lead)
 			if (itemOptions.icon) {
 				if (itemOptions.icon === "letters" && !!itemOptions.letters) {
 					lead = (
@@ -104,7 +128,6 @@ function select(title, items, options = {}) {
 				}
 			}
 
-			// handle tail (checkbox or custom element)
 			if (itemOptions.tailElement) {
 				tail = itemOptions.tailElement;
 			} else if (itemOptions.checkbox != null) {
@@ -132,11 +155,9 @@ function select(title, items, options = {}) {
 			}
 
 			$item.onclick = function (e) {
-				// Check if clicked element or any parent up to the item has data-action
 				let target = e.target;
 				while (target && target !== $item) {
 					if (target.hasAttribute("data-action")) {
-						// Stop propagation and prevent default
 						e.stopPropagation();
 						e.preventDefault();
 						return false;
@@ -149,9 +170,7 @@ function select(title, items, options = {}) {
 				res(itemOptions.value);
 			};
 
-			// Handle tail click event if a custom tail and handler are provided
 			if (itemOptions.tailElement && itemOptions.ontailclick && tail) {
-				// Apply the pointer-events: all directly to the tail element
 				tail.style.pointerEvents = "all";
 
 				const tailClickHandler = function (e) {
@@ -164,8 +183,39 @@ function select(title, items, options = {}) {
 				tailClickHandlers.set(tail, tailClickHandler);
 			}
 
+			const haystack = [
+				itemOptions.text,
+				itemOptions.value,
+				itemOptions.letters,
+			]
+				.filter(Boolean)
+				.join(" ")
+				.replace(/<[^>]+>/g, "")
+				.toLowerCase();
+			searchable.push({ el: $item, haystack });
+
 			$list.append($item);
 		});
+
+		if ($searchInput) {
+			$searchInput.oninput = () => {
+				const q = $searchInput.value.trim().toLowerCase();
+				let visible = 0;
+				for (const entry of searchable) {
+					const show = !q || entry.haystack.includes(q);
+					entry.el.classList.toggle("hide", !show);
+					if (show) visible++;
+				}
+				$empty?.classList.toggle("hide", visible > 0);
+			};
+			$searchInput.onkeydown = (e) => {
+				e.stopPropagation();
+				if (e.key === "Escape") {
+					e.preventDefault();
+					cancel();
+				}
+			};
+		}
 
 		actionStack.push({
 			id: "select",
@@ -175,8 +225,12 @@ function select(title, items, options = {}) {
 		app.append($select, $mask);
 		if ($defaultVal) $defaultVal.scrollIntoView();
 
-		const $firstChild = $defaultVal || $list.firstChild;
-		if ($firstChild && $firstChild.focus) $firstChild.focus();
+		if ($searchInput) {
+			requestAnimationFrame(() => $searchInput.focus());
+		} else {
+			const $firstChild = $defaultVal || $list.firstChild;
+			if ($firstChild?.focus) $firstChild.focus();
+		}
 		restoreTheme(true);
 
 		function cancel() {
@@ -200,7 +254,6 @@ function select(title, items, options = {}) {
 			hideSelect();
 			let listItems = [...$list.children];
 			listItems.map((item) => (item.onclick = null));
-			// Clean up tail click handlers
 			tailClickHandlers.forEach((handler, element) => {
 				element.removeEventListener("click", handler);
 			});

@@ -74,6 +74,42 @@
     width: fit-content;
     max-width: 320px;
 
+    &.searchable {
+      width: min(92vw, 340px);
+      max-width: min(92vw, 340px);
+    }
+
+    .select-search {
+      display: block;
+      width: calc(100% - 20px);
+      margin: 0 10px 6px;
+      box-sizing: border-box;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 8px 10px;
+      background: var(--secondary-color);
+      color: var(--popup-text-color);
+      font: inherit;
+      font-size: 0.9rem;
+      outline: none;
+    }
+
+    .select-empty {
+      padding: 16px 12px 20px;
+      text-align: center;
+      opacity: 0.55;
+      font-size: 0.85rem;
+      color: var(--popup-text-color);
+
+      &.hide {
+        display: none;
+      }
+    }
+
+    ul li.hide {
+      display: none;
+    }
+
     ul li :nth-child(2) {
       display: block;
       overflow: hidden;

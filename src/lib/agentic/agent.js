@@ -157,6 +157,45 @@ function partsText(parts) {
 }
 
 /**
+ * Rough character→token estimate (≈4 chars/token).
+ * @param {number} chars
+ */
+function charsToTokens(chars) {
+	return Math.ceil(Math.max(0, chars) / 4);
+}
+
+/**
+ * Estimate how much of the model's context window the next request would use.
+ * Includes system prompt, chat history, tool schemas, and the active file.
+ *
+ * @param {object} opts
+ * @param {ChatMessage[]} opts.messages
+ * @param {import("./types").Model} [opts.model]
+ * @returns {{ used: number, limit: number, percent: number }}
+ */
+export function estimateContextUsage({ messages, model }) {
+	const system = buildSystemPrompt();
+	let chars = system.length + 3500; // tool schema overhead
+
+	for (const message of messages || []) {
+		for (const part of message.parts || []) {
+			if (part.type === "text" || part.type === "reasoning") {
+				chars += String(part.text || "").length;
+			} else if (part.type === "tool") {
+				chars += JSON.stringify(part.args || {}).length;
+				chars += String(part.result || "").length;
+				chars += 80;
+			}
+		}
+	}
+
+	const used = charsToTokens(chars);
+	const limit = Math.max(1, Number(model?.limit?.context) || 128000);
+	const percent = Math.min(100, Math.round((used / limit) * 100));
+	return { used, limit, percent };
+}
+
+/**
  * Run the agent for the active session until the model finishes.
  *
  * @param {object} opts

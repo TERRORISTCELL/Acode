@@ -5,7 +5,7 @@ import confirm from "dialogs/confirm";
 import prompt from "dialogs/prompt";
 import select from "dialogs/select";
 import actionStack from "lib/actionStack";
-import runAgent from "lib/agentic/agent";
+import runAgent, { estimateContextUsage } from "lib/agentic/agent";
 import {
 	getModel,
 	getProvider,
@@ -63,7 +63,13 @@ export default function createAgentChatView() {
 	//#region DOM
 
 	const $menuBtn = (
-		<span className="icon menu" role="button" tabIndex={0} aria-label="Chats" />
+		<span
+			className="icon menu"
+			attr-action="toggle-chats"
+			role="button"
+			tabIndex={0}
+			aria-label="Chats"
+		/>
 	);
 	const $page = Page("Chat", { tail: $menuBtn });
 	$page.classList.add("agentic-chat-page");
@@ -91,6 +97,14 @@ export default function createAgentChatView() {
 		<div className="agentic-chat__messages" role="log" aria-live="polite" />
 	);
 	const $composer = <div className="agentic-chat__composer" />;
+	const $context = (
+		<div className="agentic-chat__context" title="Estimated context usage">
+			<div className="agentic-chat__context-bar">
+				<span className="agentic-chat__context-fill" />
+			</div>
+			<span className="agentic-chat__context-label" />
+		</div>
+	);
 	const $meta = <div className="agentic-chat__meta" />;
 	const $modelBtn = (
 		<button type="button" className="agentic-chat__meta-btn">
@@ -138,13 +152,15 @@ export default function createAgentChatView() {
 	$drawer.append($drawerHead, $workspaceLabel, $sessionList);
 	$meta.append($modelBtn, $thinkingBtn, $keyBtn);
 	$inputRow.append($input, $sendBtn);
-	$composer.append($meta, $inputRow);
+	$composer.append($context, $meta, $inputRow);
 	$main.append($messages, $composer);
 	$root.append($backdrop, $drawer, $main);
 	$page.append($root);
 
 	const $modelValue = $modelBtn.get(".agentic-chat__meta-value");
 	const $thinkingValue = $thinkingBtn.get(".agentic-chat__meta-value");
+	const $contextFill = $context.get(".agentic-chat__context-fill");
+	const $contextLabel = $context.get(".agentic-chat__context-label");
 
 	//#endregion
 
@@ -505,7 +521,21 @@ export default function createAgentChatView() {
 			: "This model does not support thinking";
 
 		$keyBtn.classList.toggle("has-key", hasApiKey(state.settings.providerId));
+		renderContextMeter(model);
 		updateSendButton();
+	}
+
+	function renderContextMeter(model) {
+		const session = getActiveSession(state);
+		const usage = estimateContextUsage({
+			messages: session?.messages || [],
+			model,
+		});
+		$contextFill.style.width = `${usage.percent}%`;
+		$contextFill.classList.toggle("is-warn", usage.percent >= 70);
+		$contextFill.classList.toggle("is-danger", usage.percent >= 90);
+		$contextLabel.textContent = `${formatTokens(usage.used)} / ${formatTokens(usage.limit)} · ${usage.percent}%`;
+		$context.title = `Estimated context for the next request (system + chat + tools)\n${usage.used.toLocaleString()} / ${usage.limit.toLocaleString()} tokens`;
 	}
 
 	function updateSendButton() {
@@ -533,7 +563,12 @@ export default function createAgentChatView() {
 				value: p.id,
 				text: hasApiKey(p.id) ? `${p.name}  ·  key set` : p.name,
 			})),
-			{ default: state.settings.providerId, hideOnSelect: true },
+			{
+				default: state.settings.providerId,
+				hideOnSelect: true,
+				search: true,
+				searchPlaceholder: "Search providers…",
+			},
 		).catch(() => null);
 		if (!providerId) return;
 
@@ -562,6 +597,8 @@ export default function createAgentChatView() {
 						? state.settings.modelId
 						: models[0].id,
 				hideOnSelect: true,
+				search: true,
+				searchPlaceholder: "Search models…",
 			},
 		).catch(() => null);
 		if (!modelId) return;
@@ -660,6 +697,9 @@ export default function createAgentChatView() {
 				onUpdate() {
 					session.updatedAt = Date.now();
 					queueStreamRender(assistantMessage);
+					renderContextMeter(
+						getModel(state.settings.providerId, state.settings.modelId),
+					);
 					persistSoon();
 				},
 				confirmCommand(command) {
@@ -812,6 +852,13 @@ function toolIcon(name) {
 		default:
 			return "document-code-outline";
 	}
+}
+
+function formatTokens(n) {
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	if (n >= 10_000) return `${Math.round(n / 1000)}k`;
+	if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+	return String(n);
 }
 
 /**
