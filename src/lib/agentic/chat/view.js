@@ -1,11 +1,15 @@
 import "./view.scss";
 import Page from "components/page";
+import toast from "components/toast";
 import alert from "dialogs/alert";
 import confirm from "dialogs/confirm";
 import prompt from "dialogs/prompt";
 import select from "dialogs/select";
 import actionStack from "lib/actionStack";
-import runAgent, { estimateContextUsage } from "lib/agentic/agent";
+import runAgent, {
+	condenseChat,
+	estimateContextUsage,
+} from "lib/agentic/agent";
 import {
 	getModel,
 	getProvider,
@@ -14,6 +18,8 @@ import {
 } from "lib/agentic/catalog";
 import { isProviderSupported } from "lib/agentic/client";
 import { getApiKey, hasApiKey, setApiKey } from "lib/agentic/keys";
+import { revertToCheckpoint } from "lib/agentic/tools";
+import openFile from "lib/openFile";
 import renderMarkdown from "./markdown";
 import {
 	createMessage,
@@ -98,12 +104,17 @@ export default function createAgentChatView() {
 	);
 	const $composer = <div className="agentic-chat__composer" />;
 	const $context = (
-		<div className="agentic-chat__context" title="Estimated context usage">
+		<button
+			type="button"
+			className="agentic-chat__context"
+			title="Estimated context usage. Tap to condense the chat."
+		>
 			<div className="agentic-chat__context-bar">
 				<span className="agentic-chat__context-fill" />
 			</div>
 			<span className="agentic-chat__context-label" />
-		</div>
+			<span className="icon unfold_less" aria-hidden="true" />
+		</button>
 	);
 	const $meta = <div className="agentic-chat__meta" />;
 	const $modelBtn = (
@@ -136,7 +147,7 @@ export default function createAgentChatView() {
 			className="agentic-chat__input"
 			rows={1}
 			placeholder="Ask about your code…"
-			enterKeyHint="send"
+			enterKeyHint="enter"
 			aria-label="Message"
 		/>
 	);
@@ -361,95 +372,407 @@ export default function createAgentChatView() {
 			);
 		}
 		const $el = <div className="agentic-chat__assistant" />;
-		fillAssistantEl($el, message);
+		syncAssistantEl($el, message);
 		return $el;
 	}
 
 	/**
+	 * Incrementally sync an assistant message into its element. Existing
+	 * part nodes are updated in place so streaming doesn't wipe out
+	 * expanded tool cards, reasoning panels, or scroll positions.
 	 * @param {HTMLElement} $el
 	 * @param {import("./store").ChatMessage} message
 	 */
-	function fillAssistantEl($el, message) {
-		$el.innerHTML = "";
-
-		for (const part of message.parts) {
-			if (part.type === "reasoning" && part.text?.trim()) {
-				const $details = (
-					<details className="agentic-chat__reasoning">
-						<summary>
-							<span className="icon lightbulb" aria-hidden="true" />
-							Thinking
-						</summary>
-					</details>
-				);
-				$details.append(
-					<div className="agentic-chat__reasoning-body">{part.text}</div>,
-				);
-				$el.append($details);
-			} else if (part.type === "text" && part.text) {
-				const $text = <div className="agentic-chat__md" />;
-				$text.innerHTML = renderMarkdown(part.text);
-				$el.append($text);
-			} else if (part.type === "tool") {
-				$el.append(buildToolEl(part));
-			}
+	function syncAssistantEl($el, message) {
+		let sync = $el._sync;
+		if (!sync) {
+			sync = {
+				records: [],
+				$tail: <div className="agentic-chat__msg-tail" />,
+				condensed: null,
+			};
+			$el.append(sync.$tail);
+			$el._sync = sync;
 		}
 
-		if (message.error) {
-			$el.append(
-				<div className="agentic-chat__error">
-					<span className="icon warningreport_problem" aria-hidden="true" />
-					<span>{message.error}</span>
+		if (message.condensed) {
+			syncCondensed(sync, message);
+		} else {
+			syncParts($el, sync, message);
+		}
+		syncTail(sync, message);
+	}
+
+	/**
+	 * @param {HTMLElement} $el
+	 * @param {object} sync
+	 * @param {import("./store").ChatMessage} message
+	 */
+	function syncParts($el, sync, message) {
+		const parts = message.parts;
+		for (let i = 0; i < parts.length; i++) {
+			const part = parts[i];
+			let record = sync.records[i];
+			// Parts are mutated in place by the agent loop, so identity is
+			// stable; a mismatch means the layout changed — rebuild from here.
+			if (!record || record.part !== part) {
+				for (const stale of sync.records.splice(i)) stale.el.remove();
+				record = buildPartRecord(part);
+				sync.records[i] = record;
+				$el.insertBefore(record.el, sync.$tail);
+			}
+			updatePartRecord(record);
+		}
+		for (const stale of sync.records.splice(parts.length)) stale.el.remove();
+	}
+
+	/**
+	 * @param {import("./store").MessagePart} part
+	 */
+	function buildPartRecord(part) {
+		if (part.type === "text") {
+			return { part, el: <div className="agentic-chat__md" />, lastText: null };
+		}
+		if (part.type === "reasoning") {
+			const $body = <div className="agentic-chat__reasoning-body" />;
+			const el = (
+				<details className="agentic-chat__reasoning">
+					<summary>
+						<span className="icon lightbulb" aria-hidden="true" />
+						Thinking
+					</summary>
+					{$body}
+				</details>
+			);
+			return { part, el, $body, lastText: null };
+		}
+		return buildToolRecord(part);
+	}
+
+	/**
+	 * @param {import("./store").MessagePart} part
+	 */
+	function buildToolRecord(part) {
+		const $status = <span className="agentic-chat__tool-status" />;
+		const $diffstat = <span className="agentic-chat__diffstat" />;
+		const $body = <div className="agentic-chat__tool-body" />;
+		const el = (
+			<details className="agentic-chat__tool">
+				<summary>
+					<span className={`icon ${toolIcon(part.name)}`} aria-hidden="true" />
+					<span className="agentic-chat__tool-summary">
+						{part.summary || part.name}
+					</span>
+					{$diffstat}
+					{$status}
+				</summary>
+				{$body}
+			</details>
+		);
+		return {
+			part,
+			el,
+			$status,
+			$diffstat,
+			$body,
+			lastStatus: null,
+			lastResult: null,
+			bodyBuilt: false,
+		};
+	}
+
+	/**
+	 * @param {object} record
+	 */
+	function updatePartRecord(record) {
+		const { part } = record;
+		if (part.type === "text") {
+			if (part.text !== record.lastText) {
+				record.lastText = part.text;
+				record.el.innerHTML = renderMarkdown(part.text || "");
+			}
+			return;
+		}
+		if (part.type === "reasoning") {
+			if (part.text !== record.lastText) {
+				record.lastText = part.text;
+				record.$body.textContent = part.text || "";
+			}
+			return;
+		}
+		updateToolRecord(record);
+	}
+
+	/**
+	 * @param {object} record
+	 */
+	function updateToolRecord(record) {
+		const { part, el, $status, $diffstat, $body } = record;
+		const running = part.status === "running";
+		const statusKey = `${part.status}:${part.isError}:${!!part.reverted}`;
+
+		if (statusKey !== record.lastStatus) {
+			record.lastStatus = statusKey;
+			el.classList.toggle("is-running", running);
+			el.classList.toggle("is-error", !!part.isError);
+			$status.textContent = part.reverted
+				? "reverted"
+				: running
+					? "…"
+					: part.isError
+						? "failed"
+						: "";
+		}
+
+		if (part.diff && !$diffstat.childElementCount) {
+			$diffstat.append(
+				<i className="add">+{part.diff.added}</i>,
+				<i className="del">−{part.diff.removed}</i>,
+			);
+		}
+
+		if (!running && !record.bodyBuilt) {
+			record.bodyBuilt = true;
+			buildToolBody(record);
+		} else if (
+			!running &&
+			part.result !== record.lastResult &&
+			record.$result
+		) {
+			record.$result.textContent = part.result || "";
+			record.lastResult = part.result;
+		}
+	}
+
+	/**
+	 * Fill the expandable body of a finished tool card.
+	 * @param {object} record
+	 */
+	function buildToolBody(record) {
+		const { part, $body } = record;
+		$body.innerHTML = "";
+
+		const isEditTool = part.name === "write_file" || part.name === "edit_file";
+		if (isEditTool && part.url) {
+			const $open = (
+				<button type="button" className="agentic-chat__tool-action">
+					<span className="icon exit_to_app" aria-hidden="true" />
+					Open file
+				</button>
+			);
+			$open.onclick = () => {
+				openFile(part.url, { render: true }).catch(console.error);
+			};
+			const $actions = (
+				<div className="agentic-chat__tool-actions">{$open}</div>
+			);
+			if (part.checkpoint && !part.reverted) {
+				const $revert = (
+					<button type="button" className="agentic-chat__tool-action">
+						<span className="icon undo" aria-hidden="true" />
+						Revert
+					</button>
+				);
+				$revert.onclick = async () => {
+					const ok = await confirm(
+						"Revert edit?",
+						`Restore ${part.file || "the file"} to how it was before this edit.`,
+					).catch(() => false);
+					if (!ok) return;
+					try {
+						await revertToCheckpoint(part.url, part.checkpoint);
+						part.reverted = true;
+						record.lastStatus = null;
+						updateToolRecord(record);
+						$revert.remove();
+						persistNow();
+						toast("Edit reverted.");
+					} catch (error) {
+						toast(`Revert failed: ${error?.message || error}`);
+					}
+				};
+				$actions.append($revert);
+			}
+			$body.append($actions);
+		}
+
+		if (part.diff?.hunks?.length) {
+			$body.append(buildDiffEl(part.diff));
+		} else if (part.diff?.tooLarge) {
+			$body.append(
+				<div className="agentic-chat__diff-note">
+					{`Change too large to display (+${part.diff.added} −${part.diff.removed}).`}
 				</div>,
 			);
 		}
 
-		const isStreaming =
-			isBusy() &&
-			message ===
-				getActiveSession(state)?.messages[
-					getActiveSession(state).messages.length - 1
-				];
-		if (isStreaming) {
-			$el.append(
+		if (part.result && (!part.diff || part.isError)) {
+			const $result = (
+				<pre className="agentic-chat__tool-result">{part.result}</pre>
+			);
+			record.$result = $result;
+			record.lastResult = part.result;
+			$body.append($result);
+		}
+	}
+
+	/**
+	 * @param {import("lib/agentic/diff").FileDiff} diff
+	 */
+	function buildDiffEl(diff) {
+		const $diff = <div className="agentic-chat__diff" />;
+		for (const hunk of diff.hunks) {
+			$diff.append(
+				<div className="agentic-chat__diff-hunk">
+					@@ line {hunk.newStart} @@
+				</div>,
+			);
+			for (const line of hunk.lines) {
+				const cls =
+					line.type === "+" ? " add" : line.type === "-" ? " del" : "";
+				$diff.append(
+					<div className={`agentic-chat__diff-line${cls}`}>
+						<span className="agentic-chat__diff-sign">{line.type}</span>
+						{line.text}
+					</div>,
+				);
+			}
+		}
+		return $diff;
+	}
+
+	/**
+	 * Streaming summary card for condensed history.
+	 * @param {object} sync
+	 * @param {import("./store").ChatMessage} message
+	 */
+	function syncCondensed(sync, message) {
+		const summary = partsPlainText(message.parts);
+		if (!sync.condensed) {
+			const $body = <div className="agentic-chat__md" />;
+			const $details = (
+				<details className="agentic-chat__condensed">
+					<summary>
+						<span className="icon unfold_less" aria-hidden="true" />
+						<span className="agentic-chat__condensed-title">
+							Conversation condensed
+						</span>
+						<span className="agentic-chat__condensed-hint">
+							tap for summary
+						</span>
+					</summary>
+					{$body}
+				</details>
+			);
+			sync.condensed = { $body, lastText: null };
+			sync.$tail.before($details);
+		}
+		if (summary !== sync.condensed.lastText) {
+			sync.condensed.lastText = summary;
+			sync.condensed.$body.innerHTML = renderMarkdown(
+				summary || "_Summarizing…_",
+			);
+		}
+	}
+
+	/**
+	 * Error banner, working dots, continue prompt, and message actions.
+	 * All trailing UI lives in the message's tail element.
+	 * @param {object} sync
+	 * @param {import("./store").ChatMessage} message
+	 */
+	function syncTail(sync, message) {
+		const session = getActiveSession(state);
+		const isLast = session?.messages[session.messages.length - 1] === message;
+		const streaming = isBusy() && isLast;
+		const tailKey = [
+			streaming,
+			message.error || "",
+			message.stopReason || "",
+			isLast,
+		].join("|");
+		if (tailKey === sync.lastTailKey) return;
+		sync.lastTailKey = tailKey;
+		sync.$tail.innerHTML = "";
+
+		if (message.error) {
+			const $error = (
+				<div className="agentic-chat__error">
+					<span className="icon warningreport_problem" aria-hidden="true" />
+					<span>{message.error}</span>
+				</div>
+			);
+			if (isLast && !streaming) {
+				const $retry = (
+					<button type="button" className="agentic-chat__error-retry">
+						Retry
+					</button>
+				);
+				$retry.onclick = () => regenerate(message).catch(console.error);
+				$error.append($retry);
+			}
+			sync.$tail.append($error);
+		}
+
+		if (streaming) {
+			sync.$tail.append(
 				<div className="agentic-chat__working">
 					<span className="agentic-chat__dot" />
 					<span className="agentic-chat__dot" />
 					<span className="agentic-chat__dot" />
 				</div>,
 			);
+			return;
 		}
-	}
 
-	/**
-	 * @param {import("./store").MessagePart} part
-	 */
-	function buildToolEl(part) {
-		const running = part.status === "running";
-		const statusClass = part.isError
-			? " is-error"
-			: running
-				? " is-running"
-				: "";
-		const $details = (
-			<details className={`agentic-chat__tool${statusClass}`}>
-				<summary>
-					<span className={`icon ${toolIcon(part.name)}`} aria-hidden="true" />
-					<span className="agentic-chat__tool-summary">
-						{part.summary || part.name}
-					</span>
-					<span className="agentic-chat__tool-status">
-						{running ? "…" : part.isError ? "failed" : ""}
-					</span>
-				</summary>
-			</details>
-		);
-		if (part.result) {
-			$details.append(
-				<pre className="agentic-chat__tool-result">{part.result}</pre>,
+		if (message.stopReason === "max-steps" && isLast) {
+			const $continue = (
+				<button type="button" className="agentic-chat__continue">
+					<span className="icon play_arrow" aria-hidden="true" />
+					Continue
+				</button>
+			);
+			$continue.onclick = () => {
+				sendText("Continue from where you stopped.").catch(console.error);
+			};
+			sync.$tail.append(
+				<div className="agentic-chat__stop-note">
+					<span>Paused — step limit reached.</span>
+					{$continue}
+				</div>,
 			);
 		}
-		return $details;
+
+		if (message.condensed) return;
+
+		const text = partsPlainText(message.parts);
+		const $actions = <div className="agentic-chat__msg-actions" />;
+		if (text) {
+			const $copy = (
+				<button
+					type="button"
+					className="agentic-chat__msg-action icon copy"
+					aria-label="Copy"
+				/>
+			);
+			$copy.onclick = () => {
+				cordova?.plugins?.clipboard?.copy(text);
+				toast("Copied");
+			};
+			$actions.append($copy);
+		}
+		if (isLast && !message.error) {
+			const $regen = (
+				<button
+					type="button"
+					className="agentic-chat__msg-action icon replay"
+					aria-label="Regenerate"
+				/>
+			);
+			$regen.onclick = () => regenerate(message).catch(console.error);
+			$actions.append($regen);
+		}
+		if ($actions.childElementCount) sync.$tail.append($actions);
 	}
 
 	/**
@@ -470,7 +793,7 @@ export default function createAgentChatView() {
 			return;
 		}
 		if (message.role === "assistant") {
-			fillAssistantEl($el, message);
+			syncAssistantEl($el, message);
 		}
 	}
 
@@ -530,12 +853,14 @@ export default function createAgentChatView() {
 		const usage = estimateContextUsage({
 			messages: session?.messages || [],
 			model,
+			lastUsage: session?.lastUsage,
 		});
+		const approx = usage.exact ? "" : "~";
 		$contextFill.style.width = `${usage.percent}%`;
 		$contextFill.classList.toggle("is-warn", usage.percent >= 70);
 		$contextFill.classList.toggle("is-danger", usage.percent >= 90);
-		$contextLabel.textContent = `${formatTokens(usage.used)} / ${formatTokens(usage.limit)} · ${usage.percent}%`;
-		$context.title = `Estimated context for the next request (system + chat + tools)\n${usage.used.toLocaleString()} / ${usage.limit.toLocaleString()} tokens`;
+		$contextLabel.textContent = `${approx}${formatTokens(usage.used)} / ${formatTokens(usage.limit)} · ${usage.percent}%`;
+		$context.title = `${usage.exact ? "Context used by the last request (reported by the provider)" : "Estimated context for the next request"}\n${usage.used.toLocaleString()} / ${usage.limit.toLocaleString()} tokens. Tap to condense the chat.`;
 	}
 
 	function updateSendButton() {
@@ -646,38 +971,157 @@ export default function createAgentChatView() {
 
 	//#region send / agent run
 
-	async function send() {
-		if (isBusy()) return;
-		const text = $input.value.trim();
-		if (!text) return;
-
+	/**
+	 * Ensure a usable provider/model/key. Returns them or null.
+	 */
+	async function ensureModelReady() {
 		const provider = getProvider(state.settings.providerId);
 		const model = getModel(state.settings.providerId, state.settings.modelId);
 		if (!provider || !model) {
 			await pickModel();
-			return;
+			return null;
 		}
 		if (!hasApiKey(provider.id)) {
 			const ok = await editApiKey();
-			if (!ok) return;
+			if (!ok) return null;
 		}
+		return { provider, model };
+	}
 
-		const session = getActiveSession(state);
-		if (!session) return;
+	/**
+	 * Handle "/command" input. Returns true when handled.
+	 * @param {string} text
+	 */
+	function handleSlashCommand(text) {
+		if (!text.startsWith("/")) return false;
+		const command = text.slice(1).split(/\s+/)[0].toLowerCase();
 
 		$input.value = "";
 		autoGrow();
 
-		const userMessage = createMessage("user", [{ type: "text", text }]);
-		if (!session.messages.length) {
-			session.title = titleFromText(text);
+		switch (command) {
+			case "condense":
+			case "compact":
+				condense().catch(console.error);
+				break;
+			case "new":
+				$newChatBtn.onclick();
+				break;
+			default:
+				toast(`Unknown command "/${command}". Try /condense or /new.`);
+				break;
 		}
-		session.messages.push(userMessage);
-		session.updatedAt = Date.now();
+		return true;
+	}
+
+	async function condense() {
+		if (isBusy()) return;
+		const session = getActiveSession(state);
+		const messages = session?.messages || [];
+		const hasContent = messages.some((m) => m.parts?.length);
+		if (!hasContent) {
+			toast("Nothing to condense yet.");
+			return;
+		}
+
+		const ready = await ensureModelReady();
+		if (!ready) return;
+		const { provider, model } = ready;
+
+		const ok = await confirm(
+			"Condense chat?",
+			"The conversation will be replaced with a compact summary. The agent keeps working with the summary as context; old messages are removed. This cannot be undone.",
+		).catch(() => false);
+		if (!ok) return;
+
+		const original = [...session.messages];
+		const summaryMessage = createMessage("assistant", [
+			{ type: "text", text: "" },
+		]);
+		summaryMessage.condensed = true;
+		session.messages.push(summaryMessage);
+		renderAll();
+
+		runController = new AbortController();
+		const { signal } = runController;
+		updateSendButton();
+
+		try {
+			const summary = await condenseChat({
+				provider,
+				model,
+				apiKey: getApiKey(provider.id),
+				messages: original,
+				signal,
+				onDelta(text) {
+					summaryMessage.parts[0].text = text;
+					queueStreamRender(summaryMessage);
+				},
+			});
+			summaryMessage.parts[0].text = summary;
+			session.messages = [summaryMessage];
+			session.lastUsage = null;
+			session.updatedAt = Date.now();
+			toast("Chat condensed.");
+		} catch (error) {
+			// Restore the original conversation on failure or stop.
+			session.messages = original;
+			if (error?.name !== "AbortError") {
+				console.error("Condense failed:", error);
+				toast(`Condense failed: ${error?.message || error}`);
+			}
+		} finally {
+			if (runController?.signal === signal) runController = null;
+			persistNow();
+			renderAll();
+		}
+	}
+
+	/** Exact commands the user approved for the rest of this session. */
+	const approvedCommands = new Set();
+
+	/**
+	 * Approve a shell command: safe read-only commands run without asking,
+	 * session-approved commands are remembered, everything else shows the
+	 * full command (scrollable, never truncated) for review.
+	 * @param {string} command
+	 * @returns {Promise<boolean>}
+	 */
+	async function confirmCommand(command) {
+		if (approvedCommands.has(command)) return true;
+		if (isSafeReadOnlyCommand(command)) return true;
+
+		const html = `<pre class="agentic-chat__cmd">${escapeHtml(command)}</pre>`;
+		const response = await confirm("Run command?", html, true, {
+			checkboxText: "Don't ask again for this command (this session)",
+			returnState: true,
+		}).catch(() => ({ confirmed: false, checked: false }));
+
+		if (response.confirmed && response.checked) {
+			approvedCommands.add(command);
+		}
+		return !!response.confirmed;
+	}
+
+	/**
+	 * Run one agent turn on the session (the last message must be from
+	 * the user). Appends and streams the assistant reply.
+	 * @param {import("./store").ChatSession} session
+	 */
+	async function runTurn(session) {
+		const ready = await ensureModelReady();
+		if (!ready) {
+			// A user message may already be queued; make sure it's visible.
+			persistNow();
+			renderAll();
+			return;
+		}
+		const { provider, model } = ready;
 
 		const assistantMessage = createMessage("assistant", []);
 		const history = [...session.messages];
 		session.messages.push(assistantMessage);
+		session.updatedAt = Date.now();
 		persistNow();
 		renderAll();
 
@@ -697,17 +1141,18 @@ export default function createAgentChatView() {
 				onUpdate() {
 					session.updatedAt = Date.now();
 					queueStreamRender(assistantMessage);
+					persistSoon();
+				},
+				onUsage(usage) {
+					session.lastUsage = usage;
 					renderContextMeter(
 						getModel(state.settings.providerId, state.settings.modelId),
 					);
-					persistSoon();
 				},
-				confirmCommand(command) {
-					return confirm(
-						"Run command?",
-						command.length > 300 ? `${command.slice(0, 300)}…` : command,
-					).catch(() => false);
+				onStatus(text) {
+					toast(text);
 				},
+				confirmCommand,
 			});
 		} catch (error) {
 			if (error?.name !== "AbortError") {
@@ -729,9 +1174,59 @@ export default function createAgentChatView() {
 			session.updatedAt = Date.now();
 			persistNow();
 			updateMessageEl(assistantMessage);
-			updateSendButton();
+			renderControls();
 			scrollToBottom();
 		}
+	}
+
+	/**
+	 * Send a message programmatically (continue button, retries).
+	 * @param {string} text
+	 */
+	async function sendText(text) {
+		if (isBusy()) return;
+		const session = getActiveSession(state);
+		if (!session) return;
+		const userMessage = createMessage("user", [{ type: "text", text }]);
+		if (!session.messages.length) {
+			session.title = titleFromText(text);
+		}
+		session.messages.push(userMessage);
+		session.updatedAt = Date.now();
+		await runTurn(session);
+	}
+
+	async function send() {
+		if (isBusy()) return;
+		const text = $input.value.trim();
+		if (!text) return;
+		if (handleSlashCommand(text)) return;
+
+		// Resolve model/key dialogs before consuming the typed message so
+		// cancelling doesn't eat it.
+		const ready = await ensureModelReady();
+		if (!ready) return;
+
+		$input.value = "";
+		autoGrow();
+		await sendText(text);
+	}
+
+	/**
+	 * Throw away an assistant message (and everything after it) and run
+	 * the turn again.
+	 * @param {import("./store").ChatMessage} message
+	 */
+	async function regenerate(message) {
+		if (isBusy()) return;
+		const session = getActiveSession(state);
+		if (!session) return;
+		const index = session.messages.indexOf(message);
+		if (index < 0 || session.messages[index].role !== "assistant") return;
+		session.messages.splice(index);
+		if (!session.messages.length) return;
+		persistNow();
+		await runTurn(session);
 	}
 
 	//#endregion
@@ -764,6 +1259,7 @@ export default function createAgentChatView() {
 	$modelBtn.onclick = () => pickModel().catch(console.error);
 	$thinkingBtn.onclick = () => pickThinking().catch(console.error);
 	$keyBtn.onclick = () => editApiKey().catch(console.error);
+	$context.onclick = () => condense().catch(console.error);
 	$sendBtn.onclick = () => {
 		if (isBusy()) {
 			stopRun();
@@ -772,8 +1268,10 @@ export default function createAgentChatView() {
 		send().catch(console.error);
 	};
 	$input.addEventListener("input", autoGrow);
+	// On phones Enter inserts a newline (multiline messages would otherwise
+	// be impossible); Ctrl/Cmd+Enter sends for physical keyboards.
 	$input.addEventListener("keydown", (e) => {
-		if (e.key === "Enter" && !e.shiftKey) {
+		if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
 			e.preventDefault();
 			send().catch(console.error);
 		}
@@ -826,6 +1324,91 @@ function ensureValidModel(state) {
 		settings.providerId = first.id;
 		settings.modelId = Object.keys(first.models)[0];
 	}
+}
+
+function escapeHtml(text) {
+	return String(text)
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;");
+}
+
+/** Commands that only inspect state and are auto-approved. */
+const SAFE_COMMANDS = new Set([
+	"ls",
+	"cat",
+	"head",
+	"tail",
+	"grep",
+	"egrep",
+	"fgrep",
+	"find",
+	"pwd",
+	"echo",
+	"wc",
+	"du",
+	"df",
+	"stat",
+	"file",
+	"which",
+	"whoami",
+	"uname",
+	"date",
+	"env",
+	"printenv",
+	"basename",
+	"dirname",
+	"realpath",
+	"readlink",
+	"md5sum",
+	"sha1sum",
+	"sha256sum",
+	"sort",
+	"uniq",
+	"cut",
+	"tr",
+	"diff",
+	"cmp",
+	"ps",
+	"id",
+]);
+
+const SAFE_GIT_SUBCOMMANDS = new Set([
+	"status",
+	"log",
+	"diff",
+	"show",
+	"branch",
+	"remote",
+	"blame",
+	"shortlog",
+	"describe",
+	"rev-parse",
+	"ls-files",
+]);
+
+/**
+ * Whether a command is read-only enough to run without confirmation.
+ * Deliberately conservative: any redirection, substitution, or unknown
+ * program falls through to the approval dialog.
+ * @param {string} command
+ */
+function isSafeReadOnlyCommand(command) {
+	// Redirections and substitutions can turn "safe" programs into writes.
+	if (/[><`]|\$\(/.test(command)) return false;
+
+	const segments = command.split(/&&|\|\||[|;&]/);
+	for (const segment of segments) {
+		const trimmed = segment.trim();
+		if (!trimmed) continue;
+		const [program, sub] = trimmed.split(/\s+/);
+		if (program === "git") {
+			if (!SAFE_GIT_SUBCOMMANDS.has(sub)) return false;
+		} else if (!SAFE_COMMANDS.has(program)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 function partsPlainText(parts) {

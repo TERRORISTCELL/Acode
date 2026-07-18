@@ -11,6 +11,7 @@ import { getDocText } from "cm/editorUtils";
 import fileList from "lib/fileList";
 import { addedFolder } from "lib/openFolder";
 import Url from "utils/Url";
+import diffLines from "./diff";
 
 const MAX_READ_CHARS = 60000;
 const MAX_TOOL_RESULT_CHARS = 30000;
@@ -18,6 +19,8 @@ const MAX_SEARCH_FILES = 500;
 const MAX_SEARCH_MATCHES = 120;
 const MAX_SEARCH_FILE_SIZE = 512 * 1024;
 const COMMAND_TIMEOUT_MS = 120000;
+/** Above this size we keep the diff but drop the revert snapshot. */
+const MAX_CHECKPOINT_CHARS = 200000;
 
 const BINARY_EXT =
 	/\.(png|jpe?g|gif|webp|bmp|ico|mp3|mp4|mkv|webm|wav|ogg|zip|gz|xz|bz2|7z|rar|jar|apk|so|dex|pdf|ttf|otf|woff2?|eot|class|bin|exe|dll|db|sqlite)$/i;
@@ -207,48 +210,84 @@ export function getWorkspaceFolders() {
 }
 
 /**
+ * @typedef {object} ToolMeta
+ * @property {string} [file] - display path of the touched file
+ * @property {string} [url] - resolved url of the touched file
+ * @property {import("./diff").FileDiff} [diff] - for write/edit tools
+ * @property {{before: string, existed: boolean} | null} [checkpoint] -
+ *   pre-edit snapshot for revert; null when the file was too large.
+ */
+
+/**
  * Execute one tool call.
  * @param {string} name
  * @param {object} args
  * @param {object} [hooks]
  * @param {(command: string) => Promise<boolean>} [hooks.confirmCommand]
- * @returns {Promise<{result: string, isError: boolean}>}
+ * @param {AbortSignal} [hooks.signal]
+ * @returns {Promise<{result: string, isError: boolean, meta?: ToolMeta}>}
  */
 export async function executeTool(name, args, hooks = {}) {
 	try {
-		let result;
+		if (hooks.signal?.aborted) {
+			return { result: "Cancelled by the user.", isError: true };
+		}
+		let outcome;
 		switch (name) {
 			case "read_file":
-				result = await readFileTool(args);
+				outcome = await readFileTool(args);
 				break;
 			case "write_file":
-				result = await writeFileTool(args);
+				outcome = await writeFileTool(args);
 				break;
 			case "edit_file":
-				result = await editFileTool(args);
+				outcome = await editFileTool(args);
 				break;
 			case "list_dir":
-				result = await listDirTool(args);
+				outcome = await listDirTool(args);
 				break;
 			case "search_files":
-				result = await searchFilesTool(args);
+				outcome = await searchFilesTool(args);
 				break;
 			case "find_files":
-				result = await findFilesTool(args);
+				outcome = await findFilesTool(args);
 				break;
 			case "run_command":
-				result = await runCommandTool(args, hooks);
+				outcome = await runCommandTool(args, hooks);
 				break;
 			default:
 				return { result: `Unknown tool: ${name}`, isError: true };
 		}
-		return { result: truncate(result, MAX_TOOL_RESULT_CHARS), isError: false };
+		if (typeof outcome === "string") outcome = { result: outcome };
+		return {
+			result: truncate(outcome.result, MAX_TOOL_RESULT_CHARS),
+			isError: false,
+			meta: outcome.meta,
+		};
 	} catch (error) {
 		return {
 			result: `Error: ${error?.message || String(error)}`,
 			isError: true,
 		};
 	}
+}
+
+/**
+ * Restore a file to its pre-edit checkpoint. Created files are removed.
+ * @param {string} url
+ * @param {{before: string, existed: boolean}} checkpoint
+ */
+export async function revertToCheckpoint(url, checkpoint) {
+	if (!checkpoint) throw new Error("No checkpoint available for this edit.");
+	if (checkpoint.existed) {
+		await writeCurrentContent(url, checkpoint.before);
+		return;
+	}
+	// File was created by the agent: remove it (close the tab first).
+	const open = getOpenEditorFile(url);
+	if (open) await open.remove?.(true).catch(() => {});
+	const fs = fsOperation(url);
+	if (await fs.exists()) await fs.delete();
 }
 
 //#region path helpers
@@ -403,11 +442,52 @@ async function readFileTool({ path, offset, limit }) {
 	return `${header}\n${out}`;
 }
 
+/**
+ * Snapshot a file before modifying it, for diff display and revert.
+ * @param {string} url
+ * @returns {Promise<{before: string, existed: boolean}>}
+ */
+async function snapshotFile(url) {
+	const exists = await fsOperation(url)
+		.exists()
+		.catch(() => false);
+	if (!exists && !getOpenEditorFile(url)) {
+		return { before: "", existed: false };
+	}
+	try {
+		return { before: await readCurrentContent(url), existed: true };
+	} catch {
+		return { before: "", existed: false };
+	}
+}
+
+/**
+ * @param {string} url
+ * @param {{before: string, existed: boolean}} snapshot
+ * @param {string} after
+ * @returns {ToolMeta}
+ */
+function editMeta(url, snapshot, after) {
+	const keepCheckpoint = snapshot.before.length <= MAX_CHECKPOINT_CHARS;
+	return {
+		file: displayPath(url),
+		url,
+		diff: diffLines(snapshot.before, after),
+		checkpoint: keepCheckpoint ? snapshot : null,
+	};
+}
+
 async function writeFileTool({ path, content }) {
 	const url = resolvePath(path);
-	await writeCurrentContent(url, String(content ?? ""));
-	const lines = String(content ?? "").split("\n").length;
-	return `Wrote ${displayPath(url)} (${lines} lines).`;
+	const text = String(content ?? "");
+	const snapshot = await snapshotFile(url);
+	await writeCurrentContent(url, text);
+	const lines = text.split("\n").length;
+	const verb = snapshot.existed ? "Wrote" : "Created";
+	return {
+		result: `${verb} ${displayPath(url)} (${lines} lines).`,
+		meta: editMeta(url, snapshot, text),
+	};
 }
 
 async function editFileTool({ path, old_string, new_string, replace_all }) {
@@ -432,11 +512,15 @@ async function editFileTool({ path, old_string, new_string, replace_all }) {
 		);
 	}
 
+	// Use a replacer function so "$&", "$'" etc. in new_string are literal.
 	const updated = replace_all
 		? content.split(oldStr).join(newStr)
-		: content.replace(oldStr, newStr);
+		: content.replace(oldStr, () => newStr);
 	await writeCurrentContent(url, updated);
-	return `Edited ${displayPath(url)} (${occurrences} replacement${occurrences === 1 ? "" : "s"}).`;
+	return {
+		result: `Edited ${displayPath(url)} (${occurrences} replacement${occurrences === 1 ? "" : "s"}).`,
+		meta: editMeta(url, { before: content, existed: true }, updated),
+	};
 }
 
 async function listDirTool({ path } = {}) {
@@ -535,7 +619,8 @@ async function findFilesTool({ query }) {
 async function runCommandTool({ command }, hooks) {
 	const cmd = String(command || "").trim();
 	if (!cmd) throw new Error("command must not be empty.");
-	if (typeof window.Executor?.execute !== "function") {
+	const Executor = window.Executor;
+	if (typeof Executor?.execute !== "function") {
 		throw new Error("Shell execution is not available on this device.");
 	}
 
@@ -545,6 +630,7 @@ async function runCommandTool({ command }, hooks) {
 			return "The user declined to run this command.";
 		}
 	}
+	if (hooks.signal?.aborted) return "Cancelled by the user.";
 
 	const root = workspaceRoot();
 	let full = cmd;
@@ -553,14 +639,26 @@ async function runCommandTool({ command }, hooks) {
 		full = `cd '${dir}' 2>/dev/null; ${cmd}`;
 	}
 
+	// Prefer the streaming API: it gives us a process handle we can kill
+	// on stop/timeout. `execute()` has no way to terminate the process.
+	if (
+		typeof Executor.start === "function" &&
+		typeof Executor.stop === "function"
+	) {
+		return await runKillableCommand(Executor, full, hooks.signal);
+	}
+
 	const output = await Promise.race([
-		window.Executor.execute(full).catch((error) => {
+		Executor.execute(full).catch((error) => {
 			// Executor rejects with stderr/exit info; surface it as output.
 			return `[command failed] ${typeof error === "string" ? error : error?.message || error}`;
 		}),
 		new Promise((resolve) =>
 			setTimeout(
-				() => resolve("[command timed out after 120s]"),
+				() =>
+					resolve(
+						"[command timed out after 120s — it may still be running in the background]",
+					),
 				COMMAND_TIMEOUT_MS,
 			),
 		),
@@ -568,6 +666,86 @@ async function runCommandTool({ command }, hooks) {
 
 	const text = String(output ?? "").trim();
 	return text || "(no output)";
+}
+
+/**
+ * Run a command through Executor.start so it can be terminated when the
+ * user stops the agent or the timeout fires.
+ * @param {object} Executor
+ * @param {string} command
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<string>}
+ */
+function runKillableCommand(Executor, command, signal) {
+	return new Promise((resolve) => {
+		let uuid = null;
+		let output = "";
+		let settled = false;
+		let timeoutId = null;
+
+		const finish = (text) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timeoutId);
+			signal?.removeEventListener("abort", onAbort);
+			resolve(text);
+		};
+
+		const kill = () => {
+			if (uuid) Executor.stop(uuid).catch(() => {});
+		};
+
+		const onAbort = () => {
+			kill();
+			finish(appendNote(output, "[cancelled by the user — process killed]"));
+		};
+
+		timeoutId = setTimeout(() => {
+			kill();
+			finish(
+				appendNote(output, "[command timed out after 120s and was killed]"),
+			);
+		}, COMMAND_TIMEOUT_MS);
+
+		signal?.addEventListener("abort", onAbort, { once: true });
+
+		Executor.start(command, (type, data) => {
+			if (type === "stdout" || type === "stderr") {
+				output += `${data}\n`;
+				if (output.length > MAX_TOOL_RESULT_CHARS * 2) {
+					// Don't let a runaway command eat memory.
+					kill();
+					finish(
+						appendNote(output, "[output limit exceeded — process killed]"),
+					);
+				}
+			} else if (type === "exit") {
+				const code = Number.parseInt(data, 10);
+				const text = output.trim();
+				if (code === 0) {
+					finish(text || "(no output)");
+				} else {
+					finish(
+						appendNote(text, `[exit code ${Number.isNaN(code) ? data : code}]`),
+					);
+				}
+			}
+		})
+			.then((id) => {
+				uuid = id;
+				if (settled || signal?.aborted) kill();
+			})
+			.catch((error) => {
+				finish(
+					`[failed to start] ${typeof error === "string" ? error : error?.message || error}`,
+				);
+			});
+	});
+}
+
+function appendNote(output, note) {
+	const text = String(output || "").trim();
+	return text ? `${text}\n${note}` : note;
 }
 
 //#endregion

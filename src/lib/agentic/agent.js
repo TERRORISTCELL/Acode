@@ -80,23 +80,51 @@ function buildSystemPrompt() {
 	return lines.join("\n");
 }
 
+/** Keep full tool results for the last N assistant messages only. */
+const KEEP_TOOL_RESULTS_FOR = 2;
+const ELIDED_RESULT_MAX_CHARS = 1200;
+
 /**
  * Convert stored part-based chat messages into OpenAI-format API messages.
  * A single assistant message may contain several model "steps" (text,
  * tool calls, tool results, more text ...); consecutive tool parts mark
  * step boundaries.
+ *
+ * Tool results from older turns are elided to keep the context from
+ * growing without bound; the model can always re-run a tool.
  * @param {ChatMessage[]} messages
  */
 export function toApiMessages(messages) {
 	const out = [];
 
+	const assistantTotal = messages.filter(
+		(m) => m.role === "assistant" && !m.condensed,
+	).length;
+	let assistantSeen = 0;
+
 	for (const message of messages) {
+		if (message.condensed) {
+			// Send summaries as user-role context: providers like Anthropic
+			// require the conversation to start with a user message.
+			const text = partsText(message.parts);
+			if (text) {
+				out.push({
+					role: "user",
+					content: `[Summary of the conversation so far — earlier messages were condensed]\n\n${text}`,
+				});
+			}
+			continue;
+		}
 		if (message.role === "user") {
 			const text = partsText(message.parts);
 			if (text) out.push({ role: "user", content: text });
 			continue;
 		}
 		if (message.role !== "assistant") continue;
+
+		assistantSeen++;
+		const elideResults =
+			assistantTotal - assistantSeen >= KEEP_TOOL_RESULTS_FOR;
 
 		let text = "";
 		let reasoning = [];
@@ -121,10 +149,14 @@ export function toApiMessages(messages) {
 			}
 			out.push(assistant);
 			for (const part of toolParts) {
+				let content = part.result ?? "(no result)";
+				if (elideResults && content.length > ELIDED_RESULT_MAX_CHARS) {
+					content = `${content.slice(0, ELIDED_RESULT_MAX_CHARS)}\n… [older tool output elided to save context — re-run the tool if you need it]`;
+				}
 				out.push({
 					role: "tool",
 					tool_call_id: part.callId,
-					content: part.result ?? "(no result)",
+					content,
 				});
 			}
 			text = "";
@@ -171,9 +203,11 @@ function charsToTokens(chars) {
  * @param {object} opts
  * @param {ChatMessage[]} opts.messages
  * @param {import("./types").Model} [opts.model]
- * @returns {{ used: number, limit: number, percent: number }}
+ * @param {{input: number, output: number} | null} [opts.lastUsage] - real
+ *   token usage reported by the provider on the last request, if any.
+ * @returns {{ used: number, limit: number, percent: number, exact: boolean }}
  */
-export function estimateContextUsage({ messages, model }) {
+export function estimateContextUsage({ messages, model, lastUsage }) {
 	const system = buildSystemPrompt();
 	let chars = system.length + 3500; // tool schema overhead
 
@@ -189,10 +223,75 @@ export function estimateContextUsage({ messages, model }) {
 		}
 	}
 
-	const used = charsToTokens(chars);
+	let used = charsToTokens(chars);
+	let exact = false;
+	if (lastUsage) {
+		const real = (lastUsage.input || 0) + (lastUsage.output || 0);
+		if (real > 0) {
+			used = real;
+			exact = true;
+		}
+	}
 	const limit = Math.max(1, Number(model?.limit?.context) || 128000);
 	const percent = Math.min(100, Math.round((used / limit) * 100));
-	return { used, limit, percent };
+	return { used, limit, percent, exact };
+}
+
+const CONDENSE_SYSTEM =
+	"You summarize coding-assistant conversations so they can continue in a smaller context window. " +
+	"Write a dense, factual summary that preserves everything needed to keep working:\n" +
+	"- the user's overall goal and constraints\n" +
+	"- what was done so far (files read/created/edited, commands run, and their outcomes)\n" +
+	"- important code details: exact file paths, function/class names, key snippets\n" +
+	"- decisions made and why, plus anything explicitly rejected\n" +
+	"- unresolved problems, errors, and agreed next steps\n" +
+	"Write it as compact markdown. No preamble, no meta commentary about summarizing.";
+
+const CONDENSE_REQUEST =
+	"Summarize the conversation above following your instructions. This summary will replace the full history.";
+
+/**
+ * Summarize a conversation into a single markdown digest.
+ * @param {object} opts
+ * @param {import("./types").Provider} opts.provider
+ * @param {import("./types").Model} opts.model
+ * @param {string} opts.apiKey
+ * @param {ChatMessage[]} opts.messages - messages to condense
+ * @param {AbortSignal} opts.signal
+ * @param {(text: string) => void} [opts.onDelta] - streaming callback with full text so far
+ * @returns {Promise<string>} the summary text
+ */
+export async function condenseChat(opts) {
+	const { provider, model, apiKey, messages, signal, onDelta } = opts;
+
+	const apiMessages = [
+		{ role: "system", content: CONDENSE_SYSTEM },
+		...toApiMessages(messages),
+		{ role: "user", content: CONDENSE_REQUEST },
+	];
+
+	let text = "";
+	await streamChat({
+		provider,
+		model,
+		apiKey,
+		thinking: "off",
+		messages: apiMessages,
+		tools: [],
+		signal,
+		onEvent(event) {
+			if (event.type === "text") {
+				text += event.delta;
+				onDelta?.(text);
+			}
+		},
+	});
+
+	const summary = text.trim();
+	if (!summary) {
+		throw new Error("The model returned an empty summary.");
+	}
+	return summary;
 }
 
 /**
@@ -210,6 +309,10 @@ export function estimateContextUsage({ messages, model }) {
  * @param {AbortSignal} opts.signal
  * @param {() => void} opts.onUpdate - called whenever parts change.
  * @param {(command: string) => Promise<boolean>} opts.confirmCommand
+ * @param {(usage: {input: number, output: number}) => void} [opts.onUsage] -
+ *   reports real token usage after each model step.
+ * @param {(text: string) => void} [opts.onStatus] - transient status
+ *   notices (e.g. retrying after a network error).
  */
 export default async function runAgent(opts) {
 	const {
@@ -222,6 +325,8 @@ export default async function runAgent(opts) {
 		signal,
 		onUpdate,
 		confirmCommand,
+		onUsage,
+		onStatus,
 	} = opts;
 
 	const systemMessage = { role: "system", content: buildSystemPrompt() };
@@ -268,6 +373,8 @@ export default async function runAgent(opts) {
 					// New content after a tool call goes in fresh parts.
 					textPart = null;
 					reasoningPart = null;
+				} else if (event.type === "status") {
+					onStatus?.(event.delta);
 				}
 			},
 		});
@@ -277,6 +384,8 @@ export default async function runAgent(opts) {
 			const signed = result.reasoning.find((r) => r.signature);
 			if (signed) reasoningPart.signature = signed.signature;
 		}
+
+		if (result.usage) onUsage?.(result.usage);
 
 		if (!result.toolCalls.length) return;
 		if (signal.aborted) return;
@@ -310,19 +419,26 @@ export default async function runAgent(opts) {
 			if (argsError) {
 				outcome = { result: argsError, isError: true };
 			} else {
-				outcome = await executeTool(call.name, args, { confirmCommand });
+				outcome = await executeTool(call.name, args, {
+					confirmCommand,
+					signal,
+				});
 			}
 
 			toolPart.result = outcome.result;
 			toolPart.isError = outcome.isError;
 			toolPart.status = "done";
+			if (outcome.meta) {
+				toolPart.file = outcome.meta.file;
+				toolPart.url = outcome.meta.url;
+				toolPart.diff = outcome.meta.diff;
+				toolPart.checkpoint = outcome.meta.checkpoint;
+			}
 			onUpdate();
 		}
 	}
 
-	assistantMessage.parts.push({
-		type: "text",
-		text: "_Stopped: reached the maximum number of steps for a single request._",
-	});
+	// Ran out of steps: flag it so the UI can offer to continue.
+	assistantMessage.stopReason = "max-steps";
 	onUpdate();
 }

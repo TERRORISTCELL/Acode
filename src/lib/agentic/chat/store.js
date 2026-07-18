@@ -20,6 +20,12 @@ const MAX_SESSIONS = 50;
  * @property {"running"|"done"} [status]
  * @property {string|null} [result]
  * @property {boolean} [isError]
+ * @property {string} [file] - display path (write/edit tools)
+ * @property {string} [url] - resolved url (write/edit tools)
+ * @property {import("../diff").FileDiff} [diff]
+ * @property {{before: string, existed: boolean}|null} [checkpoint] -
+ *   in-memory only; stripped when persisting.
+ * @property {boolean} [reverted]
  */
 
 /**
@@ -29,6 +35,8 @@ const MAX_SESSIONS = 50;
  * @property {MessagePart[]} parts
  * @property {number} createdAt
  * @property {string} [error]
+ * @property {boolean} [condensed] - message is a summary of condensed history
+ * @property {"max-steps"} [stopReason]
  */
 
 /**
@@ -37,6 +45,8 @@ const MAX_SESSIONS = 50;
  * @property {string} title
  * @property {number} updatedAt
  * @property {ChatMessage[]} messages
+ * @property {{input: number, output: number}|null} [lastUsage] - real token
+ *   usage from the provider on the most recent request.
  */
 
 /**
@@ -104,6 +114,7 @@ export function createSession(title = "New chat") {
 		title,
 		updatedAt: Date.now(),
 		messages: [],
+		lastUsage: null,
 	};
 }
 
@@ -141,7 +152,7 @@ function normalizeParts(message) {
 			.filter((p) => p && typeof p.type === "string")
 			.map((p) => {
 				if (p.type === "tool") {
-					return {
+					const part = {
 						type: "tool",
 						callId: String(p.callId || helpers.uuid()),
 						name: String(p.name || ""),
@@ -151,6 +162,11 @@ function normalizeParts(message) {
 						result: typeof p.result === "string" ? p.result : null,
 						isError: !!p.isError,
 					};
+					if (typeof p.file === "string") part.file = p.file;
+					if (typeof p.url === "string") part.url = p.url;
+					if (p.diff && typeof p.diff === "object") part.diff = p.diff;
+					if (p.reverted) part.reverted = true;
+					return part;
 				}
 				const part = {
 					type: p.type === "reasoning" ? "reasoning" : "text",
@@ -193,8 +209,21 @@ function normalize(raw, workspace, settings) {
 									...(typeof m.error === "string" && m.error
 										? { error: m.error }
 										: {}),
+									...(m.condensed ? { condensed: true } : {}),
+									...(m.stopReason === "max-steps"
+										? { stopReason: "max-steps" }
+										: {}),
 								}))
 						: [],
+					lastUsage:
+						s.lastUsage &&
+						typeof s.lastUsage === "object" &&
+						Number(s.lastUsage.input) >= 0
+							? {
+									input: Number(s.lastUsage.input) || 0,
+									output: Number(s.lastUsage.output) || 0,
+								}
+							: null,
 				}))
 		: [];
 
@@ -320,6 +349,38 @@ export function loadStore() {
 /**
  * @param {ChatStoreState} state
  */
+const MAX_PERSISTED_DIFF_LINES = 300;
+
+/**
+ * Drop in-memory-only data (checkpoints) and oversized diffs before
+ * writing to localStorage.
+ * @param {ChatSession} session
+ */
+function serializeSession(session) {
+	return {
+		...session,
+		messages: session.messages.map((message) => ({
+			...message,
+			parts: message.parts.map((part) => {
+				if (part.type !== "tool") return part;
+				const { checkpoint, ...rest } = part;
+				if (rest.diff?.hunks) {
+					const lines = rest.diff.hunks.reduce((n, h) => n + h.lines.length, 0);
+					if (lines > MAX_PERSISTED_DIFF_LINES) {
+						rest.diff = {
+							added: rest.diff.added,
+							removed: rest.diff.removed,
+							hunks: [],
+							tooLarge: true,
+						};
+					}
+				}
+				return rest;
+			}),
+		})),
+	};
+}
+
 export function saveStore(state) {
 	try {
 		saveSettings(state.settings);
@@ -327,7 +388,8 @@ export function saveStore(state) {
 			activeId: state.activeId,
 			sessions: [...state.sessions]
 				.sort((a, b) => b.updatedAt - a.updatedAt)
-				.slice(0, MAX_SESSIONS),
+				.slice(0, MAX_SESSIONS)
+				.map(serializeSession),
 		};
 		localStorage.setItem(
 			workspaceStorageKey(state.workspaceKey || getWorkspaceInfo().key),

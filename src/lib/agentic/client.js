@@ -29,6 +29,8 @@ const SDK_BASE_URLS = {
 
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com";
 const THINKING_BUDGETS = { low: 3000, medium: 10000, high: 24000 };
+const MAX_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 1500;
 
 /**
  * @typedef {object} StreamEvent
@@ -46,6 +48,8 @@ const THINKING_BUDGETS = { low: 3000, medium: 10000, high: 24000 };
  * @property {Array<{text: string, signature?: string}>} reasoning
  * @property {ToolCall[]} toolCalls
  * @property {string} [stopReason]
+ * @property {{input: number, output: number} | null} [usage] - real token
+ *   counts reported by the provider, when available.
  */
 
 /**
@@ -72,10 +76,69 @@ export function isProviderSupported(provider) {
  * @returns {Promise<StreamResult>}
  */
 export default async function streamChat(opts) {
-	if (opts.provider?.npm === "@ai-sdk/anthropic") {
-		return streamAnthropic(opts);
+	const run =
+		opts.provider?.npm === "@ai-sdk/anthropic" ? streamAnthropic : streamOpenAI;
+
+	let lastError;
+	for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+		let emitted = false;
+		const wrapped = {
+			...opts,
+			onEvent(event) {
+				emitted = true;
+				opts.onEvent(event);
+			},
+		};
+		try {
+			return await run(wrapped);
+		} catch (error) {
+			lastError = error;
+			// Never retry after the user aborted, after content was already
+			// streamed (we'd duplicate it), or on non-transient errors.
+			if (opts.signal?.aborted || error?.name === "AbortError") throw error;
+			if (emitted || attempt >= MAX_ATTEMPTS || !isRetryable(error)) {
+				throw error;
+			}
+			opts.onEvent({
+				type: "status",
+				delta: `Connection problem, retrying (${attempt}/${MAX_ATTEMPTS - 1})…`,
+			});
+			await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), opts.signal);
+		}
 	}
-	return streamOpenAI(opts);
+	throw lastError;
+}
+
+/**
+ * Transient failures worth retrying: rate limits, server errors, and
+ * network drops (fetch rejects with TypeError).
+ * @param {unknown} error
+ */
+function isRetryable(error) {
+	const status = error?.status;
+	if (status === 429 || (status >= 500 && status < 600)) return true;
+	if (error instanceof TypeError) return true;
+	return /network|failed to fetch|load failed|ERR_/i.test(
+		String(error?.message || ""),
+	);
+}
+
+function sleep(ms, signal) {
+	return new Promise((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(new DOMException("Aborted", "AbortError"));
+			return;
+		}
+		const id = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(id);
+			reject(new DOMException("Aborted", "AbortError"));
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 //#region OpenAI-compatible
@@ -100,6 +163,15 @@ async function streamOpenAI(opts) {
 	};
 	if (tools?.length) {
 		body.tools = tools;
+	}
+	// Ask for usage in the final stream chunk where the option is known
+	// to be accepted; other providers may reject unknown fields.
+	if (
+		["openai", "openrouter", "groq", "deepseek", "xai", "mistral"].includes(
+			provider.id,
+		)
+	) {
+		body.stream_options = { include_usage: true };
 	}
 	if (model.reasoning && thinking && thinking !== "off") {
 		// Only send effort params to providers known to accept them;
@@ -133,6 +205,7 @@ async function streamOpenAI(opts) {
 		reasoning: [],
 		toolCalls: [],
 		stopReason: undefined,
+		usage: null,
 	};
 	/** @type {Map<number, ToolCall>} */
 	const pendingCalls = new Map();
@@ -141,6 +214,12 @@ async function streamOpenAI(opts) {
 	await readSse(response, signal, (data) => {
 		if (data === "[DONE]") return;
 		const chunk = safeParse(data);
+		if (chunk?.usage) {
+			result.usage = {
+				input: Number(chunk.usage.prompt_tokens) || 0,
+				output: Number(chunk.usage.completion_tokens) || 0,
+			};
+		}
 		const choice = chunk?.choices?.[0];
 		if (!choice) return;
 
@@ -236,6 +315,7 @@ async function streamAnthropic(opts) {
 		reasoning: [],
 		toolCalls: [],
 		stopReason: undefined,
+		usage: null,
 	};
 	/** @type {Record<number, {type: string, call?: ToolCall, thinking?: {text: string, signature?: string}}>} */
 	const blocks = {};
@@ -245,6 +325,19 @@ async function streamAnthropic(opts) {
 		if (!event) return;
 
 		switch (event.type) {
+			case "message_start": {
+				const usage = event.message?.usage;
+				if (usage) {
+					result.usage = {
+						input:
+							(Number(usage.input_tokens) || 0) +
+							(Number(usage.cache_read_input_tokens) || 0) +
+							(Number(usage.cache_creation_input_tokens) || 0),
+						output: Number(usage.output_tokens) || 0,
+					};
+				}
+				break;
+			}
 			case "content_block_start": {
 				const block = event.content_block;
 				if (block.type === "tool_use") {
@@ -281,6 +374,9 @@ async function streamAnthropic(opts) {
 			case "message_delta":
 				if (event.delta?.stop_reason) {
 					result.stopReason = event.delta.stop_reason;
+				}
+				if (event.usage?.output_tokens != null && result.usage) {
+					result.usage.output = Number(event.usage.output_tokens) || 0;
 				}
 				break;
 			case "error":
@@ -378,13 +474,17 @@ async function ensureOk(response, provider) {
 		detail = response.statusText;
 	}
 	const name = provider?.name || "Provider";
+	let message;
 	if (response.status === 401 || response.status === 403) {
-		throw new Error(`${name}: invalid or missing API key (${detail})`);
+		message = `${name}: invalid or missing API key (${detail})`;
+	} else if (response.status === 429) {
+		message = `${name}: rate limited (${detail})`;
+	} else {
+		message = `${name} error ${response.status}: ${detail}`;
 	}
-	if (response.status === 429) {
-		throw new Error(`${name}: rate limited (${detail})`);
-	}
-	throw new Error(`${name} error ${response.status}: ${detail}`);
+	const error = new Error(message);
+	error.status = response.status;
+	throw error;
 }
 
 /**
