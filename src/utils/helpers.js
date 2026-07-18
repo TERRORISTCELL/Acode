@@ -402,10 +402,8 @@ export default {
 			"com.android.externalstorage.documents",
 		);
 		const isTermuxUri = currentUri.includes("com.termux.documents");
-		const packageName =
-			window.BuildInfo?.packageName || "org.terroristcell.acode";
 		const isAcodeTerminalPublicSafUri = currentUri.includes(
-			`${packageName}.documents`,
+			"com.foxdebug.acode.documents",
 		);
 		const [, treeSegment = ""] = currentUri.split("/tree/");
 		const terminalBasePath = isAcodeTerminalPublicSafUri

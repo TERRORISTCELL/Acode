@@ -23,11 +23,11 @@ const JOIN_CASES = [
 	{
 		name: "Acode SAF join",
 		folderUrl:
-			"content://org.terroristcell.acode.documents/tree/%2Fdata%2Fuser%2F0%2Forg.terroristcell.acode%2Ffiles%2Fpublic",
+			"content://com.foxdebug.acode.documents/tree/%2Fdata%2Fuser%2F0%2Fcom.foxdebug.acode%2Ffiles%2Fpublic",
 		activeLocation:
-			"content://org.terroristcell.acode.documents/tree/%2Fdata%2Fuser%2F0%2Forg.terroristcell.acode%2Ffiles%2Fpublic::/data/user/0/org.terroristcell.acode/files/public/",
+			"content://com.foxdebug.acode.documents/tree/%2Fdata%2Fuser%2F0%2Fcom.foxdebug.acode%2Ffiles%2Fpublic::/data/user/0/com.foxdebug.acode/files/public/",
 		expectedJoined:
-			"content://org.terroristcell.acode.documents/tree/%2Fdata%2Fuser%2F0%2Forg.terroristcell.acode%2Ffiles%2Fpublic::/data/user/0/org.terroristcell.acode/files/public/index.html",
+			"content://com.foxdebug.acode.documents/tree/%2Fdata%2Fuser%2F0%2Fcom.foxdebug.acode%2Ffiles%2Fpublic::/data/user/0/com.foxdebug.acode/files/public/index.html",
 	},
 ];
 
@@ -44,8 +44,8 @@ const TRAILING_SLASH_CASES = [
 	},
 	{
 		name: "Acode SAF trailing slash",
-		a: "content://org.terroristcell.acode.documents/tree/%2Fdata%2Fuser%2F0%2Forg.terroristcell.acode%2Ffiles%2Fpublic/",
-		b: "content://org.terroristcell.acode.documents/tree/%2Fdata%2Fuser%2F0%2Forg.terroristcell.acode%2Ffiles%2Fpublic",
+		a: "content://com.foxdebug.acode.documents/tree/%2Fdata%2Fuser%2F0%2Fcom.foxdebug.acode%2Ffiles%2Fpublic/",
+		b: "content://com.foxdebug.acode.documents/tree/%2Fdata%2Fuser%2F0%2Fcom.foxdebug.acode%2Ffiles%2Fpublic",
 	},
 ];
 

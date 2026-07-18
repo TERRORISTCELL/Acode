@@ -19,7 +19,7 @@ import java.io.IOException;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.Locale;
-import org.terroristcell.acode.R;
+import com.foxdebug.acode.R;
 import com.foxdebug.acode.rk.exec.terminal.*;
 
 public class AlpineDocumentProvider extends DocumentsProvider {

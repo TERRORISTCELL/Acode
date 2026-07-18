@@ -24,16 +24,14 @@ import appSettings from "./settings";
 const isTermuxSafUri = (value = "") =>
 	value.startsWith("content://com.termux.documents/tree/");
 const isAcodeTerminalPublicSafUri = (value = "") => {
-	const packageName =
-		window.BuildInfo?.packageName || "org.terroristcell.acode";
+	const packageName = window.BuildInfo?.packageName || "com.foxdebug.acode";
 	return value.startsWith(`content://${packageName}.documents/tree/`);
 };
 const isTerminalSafUri = (value = "") =>
 	isTermuxSafUri(value) || isAcodeTerminalPublicSafUri(value);
 
 const getTerminalPaths = () => {
-	const packageName =
-		window.BuildInfo?.packageName || "org.terroristcell.acode";
+	const packageName = window.BuildInfo?.packageName || "com.foxdebug.acode";
 	const dataDir = `/data/user/0/${packageName}`;
 	const alpineRoot = `${dataDir}/files/alpine`;
 	const publicDir = `${dataDir}/files/public`;
