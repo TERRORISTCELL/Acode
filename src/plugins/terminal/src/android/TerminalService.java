@@ -38,10 +38,10 @@ public class TerminalService extends Service {
 
     public static final String CHANNEL_ID = "terminal_exec_channel";
     
-    public static final String ACTION_EXIT_SERVICE = "com.foxdebug.acode.ACTION_EXIT_SERVICE";
-    public static final String MOVE_TO_BACKGROUND = "com.foxdebug.acode.MOVE_TO_BACKGROUND";
-    public static final String MOVE_TO_FOREGROUND = "com.foxdebug.acode.MOVE_TO_FOREGROUND";
-    public static final String ACTION_TOGGLE_WAKE_LOCK = "com.foxdebug.acode.ACTION_TOGGLE_WAKE_LOCK";
+    public static final String ACTION_EXIT_SERVICE = "org.terroristcell.acode.ACTION_EXIT_SERVICE";
+    public static final String MOVE_TO_BACKGROUND = "org.terroristcell.acode.MOVE_TO_BACKGROUND";
+    public static final String MOVE_TO_FOREGROUND = "org.terroristcell.acode.MOVE_TO_FOREGROUND";
+    public static final String ACTION_TOGGLE_WAKE_LOCK = "org.terroristcell.acode.ACTION_TOGGLE_WAKE_LOCK";
     public static boolean Default_Foreground = true;
 
     private final Map<String, Process> processes = new ConcurrentHashMap<>();
